@@ -32,7 +32,3 @@ Contributions are welcome! If you would like to add a new algorithm, improve an 
 ## Contact
 
 If you have any questions or feedback, please open an issue in the repository, and we will get back to you as soon as possible.
-
----
-
-Feel free to adjust the text to better fit your specific project needs or personal style!
