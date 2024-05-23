@@ -1,2 +1,3 @@
 *.txt
-PKG-INFO
+*.egg-info/
+__pycache__
