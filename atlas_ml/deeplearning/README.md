@@ -9,6 +9,7 @@ This subfolder contains detailed implementations of various state-of-the-art dee
 - **LeNet**: One of the earliest convolutional networks that helped propel the field of deep learning. (implementation pending)
 - **AlexNet**: The CNN that notably won the ImageNet challenge by a large margin, sparking interest in deep learning for computer vision. (implementation pending)
 - **VGG (Visual Geometry Group)**: Characterized by its simplicity, using only 3x3 convolutional layers stacked on top of each other in increasing depth. (implementation pending)
+- **VAE (Variational Auto Encoder)**: Introduced a stochastic variational inference and training algorithm to approximate intractable posterior distribution, allowing reconstruction of a sample X from a lantent space Z. (work in progress 🛠️)
 - **Inception (GoogLeNet)**: Known for its network-in-network architecture with 1x1 convolutions to reduce dimensionality. (implementation pending)
 - **ResNet (Residual Networks)**: Known for its deep network capabilities due to skip connections that help combat the vanishing gradient problem. (implementation pending)
 - **U-Net**: Popular in medical image segmentation, featuring a symmetric expanding path that helps in precise localization. (implementation pending)
