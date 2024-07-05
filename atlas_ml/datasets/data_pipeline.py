@@ -2,10 +2,9 @@ from sklearn.datasets import load_diabetes
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-
 class DataPipeline:
 
-    def __init__(self, configs:dict):
+    def __init__(self, configs:dict=None):
         
         self.configs = configs
 

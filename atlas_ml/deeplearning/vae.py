@@ -131,7 +131,7 @@ class VAE(nn.Module):
         z = self.reparametrization(mu, logvar)
         x_reconstructed = self.decoder(z)
 
-        return x_reconstructed
+        return x_reconstructed, z, mu, logvar
     
 
 
