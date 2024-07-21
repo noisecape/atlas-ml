@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils
 import torch.utils.data
-from deeplearning import DeepLearning
+from atlas_ml.deeplearning.deeplearning import DeepLearning
 from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange, Reduce
 from atlas_ml.datasets.data_pipeline import DataPipeline
@@ -215,22 +215,4 @@ class ViT(DeepLearning):
             
             #TODO: save checkpoints
 
-            print(train_loss, val_loss)
-
-# TODO: Move this sample in a notebook to show how to use the class
-# if __name__ == '__main__':
-#     dataset_config = {'batch_size':64, 'val_split':0.2, 'num_workers':2, 'pin_memory':True}
-#     vit = ViT(in_channels=1)
-#     train_dl, val_dl = DataPipeline(configs=dataset_config).get_dataset() # default is mnist
-
-#     vit.train_model(
-#         train_dataloader=train_dl, 
-#         val_dataloader=val_dl, 
-#         optimizer=torch.optim.Adam,
-#         criterion=nn.CrossEntropyLoss,
-#         epochs=30,
-#         lr=3e-4,
-#         device='cuda')
-# from torchsummary import summary
-
-# summary(ViT().to('cuda'), (3, 224, 224), batch_size=256, device='cuda')
+            train_loop.set_description(f'Train Loss: {round(train_loss, 2)}, Val Loss: {round(val_loss, 2)}')
