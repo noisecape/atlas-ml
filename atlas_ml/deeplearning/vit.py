@@ -5,13 +5,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils
 import torch.utils.data
-from atlas_ml.deeplearning.deeplearning import DeepLearning
 from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange, Reduce
-from atlas_ml.datasets.data_pipeline import DataPipeline
-from tqdm.auto import tqdm
-from torch.utils.data import DataLoader
 from torch.optim import Optimizer
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+from atlas_ml.datasets.data_pipeline import DataPipeline
+from atlas_ml.deeplearning.deeplearning import DeepLearning
+from atlas_ml.deeplearning.utils import ResidualAdd
+
 
 class PatchEmbedding(nn.Module):
 
@@ -62,19 +65,6 @@ class MultiHeadAttention(nn.Module):
         out = rearrange(out, "b h n d -> b n (h d)")
         out = self.projection(out)
         return out
-
-
-class ResidualAdd(nn.Module):
-    def __init__(self, fn):
-        super(ResidualAdd, self).__init__()
-        self.fn = fn
-
-    def forward(self, x, **kwargs):
-        res = x
-        x = self.fn(x, **kwargs)
-        x += res
-        return x
-
 
 class MLP(nn.Sequential):
     def __init__(self, emb_size:int, expansion:int=4, drop_p:float=0.):
