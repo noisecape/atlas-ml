@@ -3,10 +3,15 @@ from typing import List
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
+from torch.optim import Optimizer
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from atlas_ml.deeplearning.deeplearning import DeepLearning
 from atlas_ml.deeplearning.utils import ResidualAdd
+from atlas_ml.transforms import TrimPixels
 
 
 # implemented following the guidelines in section 4.1 in the paper https://arxiv.org/pdf/1711.00937
@@ -61,7 +66,7 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     
-    def __init__(self, in_channels:int=128, output_channels:int=3, upsample:bool=True, scale_factor:int=2, expansion_factor:int=4):
+    def __init__(self, in_channels:int=128, output_channels:int=3, upsample:bool=True, scale_factor:int=2, expansion_factor:int=4, img_size:int=28):
         super(Decoder, self).__init__()
         upsample_layers = []
 
@@ -71,7 +76,7 @@ class Decoder(nn.Module):
                 upsample_layers.append(
                     nn.Sequential(
                         nn.Upsample(scale_factor=scale_factor),
-                        nn.Conv2d(in_channels=in_channels, out_channels=in_channels//scale_factor, kernel_size=1),
+                        nn.Conv2d(in_channels=in_channels, out_channels=in_channels//scale_factor, kernel_size=1, padding=1),
                         nn.GELU()
                     )
                 )
@@ -79,7 +84,8 @@ class Decoder(nn.Module):
 
             upsample_layers.append(nn.Sequential(
                 nn.Upsample(scale_factor=scale_factor),
-                nn.Conv2d(in_channels=in_channels, out_channels=output_channels, kernel_size=1)
+                nn.Conv2d(in_channels=in_channels, out_channels=output_channels, kernel_size=1),
+                TrimPixels(img_size=img_size)
             ))
         else:
             # standard conv transposed. it might introduce checkboard-artefacts
@@ -93,11 +99,11 @@ class Decoder(nn.Module):
 
 class Quantizer(nn.Module):
     
-    def __init__(self, codebook_dim:int=256, latent_dim:int=128):
+    def __init__(self, codebook_dim:int=256, latent_dim:int=128, beta:float=0.2):
         super(Quantizer, self).__init__()
         self.codebook = nn.Embedding(codebook_dim, latent_dim) # codebook of KxD
         self.codebook.weight.data.uniform_(-1/codebook_dim, 1/codebook_dim) # some kind of normalisation
-
+        self.beta = beta
 
     def forward(self, z):
         b, _, h, w = z.shape
@@ -117,11 +123,14 @@ class Quantizer(nn.Module):
 
         # matmul between encodings and codebook to quantize the embeddings
         quantized = torch.matmul(one_hot_encodings, self.codebook.weight) # [B*H*W, D]
+        
+        codebook_loss = F.mse_loss(z.detach(), quantized) # move the codebook's latent towards the encoder's output.
+        commitment_loss = self.beta *F.mse_loss(z, quantized.detach()) # commits the encoder to output vectors close to the codebook's
 
         # reshape to prepare dimensions for decoder
         quantized = rearrange(quantized, '(b h w) d -> b d h w', b=b, h=h, w=w)
 
-        return quantized
+        return quantized, codebook_loss, commitment_loss
 
 class VQVAE(DeepLearning):
     
@@ -129,27 +138,134 @@ class VQVAE(DeepLearning):
         super(VQVAE, self).__init__()
         self.encoder = Encoder(input_channels=input_channels, hidden_dims=hidden_dims, img_size=img_size, latent_dim=latent_dim)
         self.quantizer = Quantizer(codebook_dim=codebook_dim, latent_dim=latent_dim)
-        self.decoder = Decoder(in_channels=latent_dim, output_channels=output_channels, scale_factor=scale_factor, expansion_factor=expansion_factor)
+        self.decoder = Decoder(in_channels=latent_dim, output_channels=output_channels, scale_factor=scale_factor, expansion_factor=expansion_factor, img_size=img_size)
 
     def forward(self, x: torch.tensor) -> torch.tensor:
         output = self.encoder(x)
-        quantized_output = self.quantizer(output)
-        x_reconstructed = self.decoder(quantized_output)
-        return x_reconstructed
+        quantized_output, codebook_loss, commitment_loss = self.quantizer(output)
+        x_hat = self.decoder(quantized_output)
+        return x_hat, codebook_loss, commitment_loss
 
     def train_model(self, **kwargs) -> None:
-        return super().train_model(**kwargs)
+        # get dataloaders
+        assert 'train_dataloader' in kwargs, 'Please specify a train dataloader to start training!'
+        train_dl = kwargs['train_dataloader']
+        assert 'val_dataloader' in kwargs, 'Please specify a val dataloader to start training!'
+        val_dl = kwargs['val_dataloader']
+
+        # get optimizer
+        if 'optimizer' not in kwargs:
+            lr = kwargs['lr'] if 'lr' in kwargs else 3e-4 # default lr if not specified
+            optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        else:
+            lr = kwargs['lr'] if 'lr' in kwargs else 3e-4 # default lr if not specified
+            optimizer = kwargs['optimizer'](self.parameters(), lr=lr)
+
+        # get criterion
+        if 'criterion' not in kwargs:
+            criterion = nn.MSELoss(reduction='none')
+        else:
+            criterion = kwargs['criterion'](reduction='none')
+
+        # get epochs
+        assert 'epochs' in kwargs, "Please specify the number of epochs to start training"
+        n_epochs = kwargs['epochs']
+        start_epochs = 0 # TODO: for now is set to 0, if we load checkpoints this needs to be updated accordingly
+
+        train_loop = tqdm(range(start_epochs, n_epochs), total=n_epochs-start_epochs)
+
+        # get device
+        device = kwargs['device']
+
+        self.to(device)
+
+        start_epochs = 0
+
+        for e in train_loop:
+            train_loss = self._train_one_epoch(
+                optimizer=optimizer,
+                train_dl=train_dl,
+                criterion=criterion,
+                device=device
+            )
+            val_loss = self._val_one_epoch(
+                val_dl=val_dl, 
+                criterion=criterion, 
+                device=device, 
+                e=e
+                )
+
+            # TODO: set checkpoint here!
+            
+            train_loop.set_description(f'Train Loss: {round(train_loss, 2)}, Val Loss: {round(val_loss, 2)}')
     
-    def _train_one_epoch(self, *kwargs) -> float:
-        return super()._train_one_epoch(*kwargs)
+    def _train_one_epoch(self, optimizer:Optimizer, train_dl:DataLoader, criterion, **kwargs) -> float:
+        device = kwargs['device']
+        self.train()
+        train_loss = 0.0
+        for data in train_dl:
+            imgs = data[0].to(device)
+            batch_size=data[0].shape[0]
+            
+            x_hat, codebook_loss, commitment_loss = self.forward(imgs)
 
-    def _val_one_epoch(self, *kwargs) -> float:
-        return super()._val_one_epoch(*kwargs)
+            pixelwise_loss = criterion(x_hat, imgs).view(batch_size, -1).sum(axis=1) # sum pixels loss per batch
+            pixelwise_loss = pixelwise_loss.mean() # average over batch dimension
 
-import torch
+            loss = pixelwise_loss + codebook_loss + commitment_loss
 
-sample = torch.randn(2, 3, 128, 128)
-vq_vae = VQVAE(input_channels=3, output_channels=3, hidden_dims=[32, 64, 128], codebook_dim=512, img_size=128, latent_dim=64, scale_factor=2, expansion_factor=3)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-output = vq_vae(sample)
-print(output)
+            train_loss += loss.item()
+        
+        return train_loss / len(train_dl)
+        
+
+    def _val_one_epoch(self, val_dl:DataLoader, criterion, **kwargs) -> float:
+        device = kwargs['device']
+        self.eval()
+        val_loss = 0.0
+        for data in val_dl:
+            imgs = data[0].to(device)
+            batch_size = data[0].shape[0]
+
+            x_hat, codebook_loss, commitment_loss = self.forward(imgs)
+            pixelwise_loss = criterion(x_hat, imgs).view(batch_size, -1).sum(axis=1) # sum pixels loss per batch
+            pixelwise_loss = pixelwise_loss.mean() # average over batch dimension
+
+            loss = pixelwise_loss + codebook_loss + commitment_loss
+
+            val_loss += loss.item()
+        
+        return val_loss / len(val_dl)
+    
+
+# if __name__ == "__main__":
+
+#     from atlas_ml.datasets.data_pipeline import DataPipeline
+
+#     vq_vae = VQVAE(
+#         input_channels=1, 
+#         output_channels=1, 
+#         hidden_dims=[32, 64, 128], 
+#         codebook_dim=512, 
+#         img_size=28, 
+#         latent_dim=64, 
+#         scale_factor=2, 
+#         expansion_factor=3
+#         )
+#     dataset_config = {'batch_size':128, 'val_split':0.2, 'num_workers':2, 'pin_memory':True}
+#     train_dl, val_dl = DataPipeline(configs=dataset_config).get_dataset() # default is mnist
+
+
+#     vq_vae.train_model(
+#         train_dataloader=train_dl,
+#         val_dataloader=val_dl,
+#         optimizer=torch.optim.Adam,
+#         criterion=nn.MSELoss,
+#         epochs=10,
+#         lr=3e-4,
+#         device='cuda'
+#     )
