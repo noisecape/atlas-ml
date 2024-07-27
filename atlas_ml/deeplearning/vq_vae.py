@@ -1,3 +1,6 @@
+import math
+from typing import List
+
 import torch
 import torch.nn as nn
 from einops import rearrange
@@ -9,52 +12,78 @@ from atlas_ml.deeplearning.utils import ResidualAdd
 # implemented following the guidelines in section 4.1 in the paper https://arxiv.org/pdf/1711.00937
 class Encoder(nn.Module):
 
-    def __init__(self, in_channels:int, hidden_dim:int=256):
+    def __init__(self, input_channels:int, hidden_dims:List[int]=[32, 64], img_size:int=28, latent_dim:int=128):
         super(Encoder, self).__init__()
         
-        self.model = nn.Sequential(
-            nn.Conv2d(in_channels=in_channels, out_channels=hidden_dim, kernel_size=4, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=4, stride=2, padding=1),
+        encoder_layer = []
+        for l in hidden_dims:
+            encoder_layer.append(
+            nn.Sequential(
+                nn.Conv2d(in_channels=input_channels, out_channels=l, kernel_size=4, stride=2, padding=1),
+                nn.GELU()
+            )
+        )
+            input_channels = l
+            conv_shape = math.floor((img_size+2*1-1*(3-1)-1)/2)+1
+            img_size = conv_shape
+            
+        self.downsample = nn.Sequential(*encoder_layer)
+
+        self.residual = nn.Sequential(
             ResidualAdd(
                 nn.Sequential(
-                    nn.ReLU(),
-                    nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1),
-                    nn.ReLU(),
-                    nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1)
+                    nn.GELU(),
+                    nn.Conv2d(hidden_dims[-1], hidden_dims[-1], kernel_size=1),
+                    nn.GELU(),
+                    nn.Conv2d(hidden_dims[-1], hidden_dims[-1], kernel_size=1)
                 )
             ),
             ResidualAdd(
                 nn.Sequential(
-                    nn.ReLU(),
-                    nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1),
-                    nn.ReLU(),
-                    nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1)
+                    nn.GELU(),
+                    nn.Conv2d(hidden_dims[-1], hidden_dims[-1], kernel_size=1),
+                    nn.GELU(),
+                    nn.Conv2d(hidden_dims[-1], hidden_dims[-1], kernel_size=1)
                 )
             )
         )
 
-    
+        self.pre_quantization = nn.Sequential(
+            nn.GELU(),
+            nn.Conv2d(in_channels=hidden_dims[-1], out_channels=latent_dim, kernel_size=1)
+        )
+
     def forward(self, x):
-        output = self.model(x)
+        output = self.downsample(x) # downsample
+        output = self.residual(output) # residual layers
+        output = self.pre_quantization(output) # 1x1 conv to match codebook dim
         return output
-
-
 
 class Decoder(nn.Module):
     
-    def __init__(self, input_channels:int=256, output_channels:int=3):
+    def __init__(self, in_channels:int=128, output_channels:int=3, upsample:bool=True, scale_factor:int=2, expansion_factor:int=4):
         super(Decoder, self).__init__()
-        self.model = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=input_channels, out_channels=input_channels, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(in_channels=input_channels, out_channels=input_channels, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(in_channels=input_channels, out_channels=output_channels, kernel_size=4, stride=2, padding=1)
-        )
+        upsample_layers = []
+
+        for _ in range(expansion_factor-1):
+            upsample_layers.append(
+                nn.Sequential(
+                    nn.Upsample(scale_factor=scale_factor),
+                    nn.Conv2d(in_channels=in_channels, out_channels=in_channels//scale_factor, kernel_size=1),
+                    nn.GELU()
+                )
+            )
+            in_channels = in_channels //scale_factor
+
+        upsample_layers.append(nn.Sequential(
+            nn.Upsample(scale_factor=scale_factor),
+            nn.Conv2d(in_channels=in_channels, out_channels=output_channels, kernel_size=1)
+        ))
+
+        self.decoder = nn.Sequential(*upsample_layers)
 
     def forward(self, z_q):
-        x_reconstructed = self.model(z_q)
+        x_reconstructed = self.decoder(z_q)
         return x_reconstructed
 
 class Quantizer(nn.Module):
@@ -91,12 +120,11 @@ class Quantizer(nn.Module):
 
 class VQVAE(DeepLearning):
     
-    def __init__(self, in_channels:int=1, hidden_dim:int=256, codebook_dim:int=512) -> None:
+    def __init__(self, input_channels:int=1, output_channels:int=1, hidden_dims:list=[32, 64, 128, 256], codebook_dim:int=512, img_size:int=128, latent_dim:int=128, scale_factor:int=2, expansion_factor:int=2) -> None:
         super(VQVAE, self).__init__()
-        
-        self.encoder = Encoder(in_channels=in_channels, hidden_dim=hidden_dim)
-        self.quantizer = Quantizer(codebook_dim=codebook_dim, latent_dim=hidden_dim)
-        self.decoder = Decoder(input_channels=hidden_dim, output_channels=in_channels)
+        self.encoder = Encoder(input_channels=input_channels, hidden_dims=hidden_dims, img_size=img_size, latent_dim=latent_dim)
+        self.quantizer = Quantizer(codebook_dim=codebook_dim, latent_dim=latent_dim)
+        self.decoder = Decoder(in_channels=latent_dim, output_channels=output_channels, scale_factor=scale_factor, expansion_factor=expansion_factor)
 
     def forward(self, x: torch.tensor) -> torch.tensor:
         output = self.encoder(x)
@@ -116,7 +144,7 @@ class VQVAE(DeepLearning):
 import torch
 
 sample = torch.randn(2, 3, 128, 128)
-vq_vae = VQVAE(in_channels=3, hidden_dim=256, codebook_dim=512)
+vq_vae = VQVAE(input_channels=3, output_channels=3, hidden_dims=[32, 64, 128], codebook_dim=512, img_size=128, latent_dim=64, scale_factor=2, expansion_factor=3)
 
 output = vq_vae(sample)
 print(output)
