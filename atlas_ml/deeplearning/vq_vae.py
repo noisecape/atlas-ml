@@ -65,21 +65,26 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         upsample_layers = []
 
-        for _ in range(expansion_factor-1):
-            upsample_layers.append(
-                nn.Sequential(
-                    nn.Upsample(scale_factor=scale_factor),
-                    nn.Conv2d(in_channels=in_channels, out_channels=in_channels//scale_factor, kernel_size=1),
-                    nn.GELU()
+        if upsample:
+            # use combinatino of upsample+conv2d to avoid checkboard-artefacts
+            for _ in range(expansion_factor-1):
+                upsample_layers.append(
+                    nn.Sequential(
+                        nn.Upsample(scale_factor=scale_factor),
+                        nn.Conv2d(in_channels=in_channels, out_channels=in_channels//scale_factor, kernel_size=1),
+                        nn.GELU()
+                    )
                 )
-            )
-            in_channels = in_channels //scale_factor
+                in_channels = in_channels //scale_factor
 
-        upsample_layers.append(nn.Sequential(
-            nn.Upsample(scale_factor=scale_factor),
-            nn.Conv2d(in_channels=in_channels, out_channels=output_channels, kernel_size=1)
-        ))
-
+            upsample_layers.append(nn.Sequential(
+                nn.Upsample(scale_factor=scale_factor),
+                nn.Conv2d(in_channels=in_channels, out_channels=output_channels, kernel_size=1)
+            ))
+        else:
+            # standard conv transposed. it might introduce checkboard-artefacts
+            #TODO: add conv2d reconstrution
+            pass
         self.decoder = nn.Sequential(*upsample_layers)
 
     def forward(self, z_q):
