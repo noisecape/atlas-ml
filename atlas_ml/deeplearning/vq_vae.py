@@ -12,6 +12,7 @@ from tqdm.auto import tqdm
 from atlas_ml.deeplearning.deeplearning import DeepLearning
 from atlas_ml.deeplearning.utils import ResidualAdd
 from atlas_ml.transforms import TrimPixels
+import cv2
 
 
 # implemented following the guidelines in section 4.1 in the paper https://arxiv.org/pdf/1711.00937
@@ -66,7 +67,7 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     
-    def __init__(self, in_channels:int=128, output_channels:int=3, upsample:bool=True, scale_factor:int=2, expansion_factor:int=4, img_size:int=28):
+    def __init__(self, in_channels:int=128, output_channels:int=3, upsample:bool=False, scale_factor:int=2, expansion_factor:int=4, img_size:int=28):
         super(Decoder, self).__init__()
         upsample_layers = []
 
@@ -89,8 +90,20 @@ class Decoder(nn.Module):
             ))
         else:
             # standard conv transposed. it might introduce checkboard-artefacts
-            #TODO: add conv2d reconstrution
-            pass
+            for _ in range(expansion_factor-1):
+                upsample_layers.append(
+                    nn.Sequential(
+                        nn.ConvTranspose2d(in_channels=in_channels, out_channels=in_channels//scale_factor, kernel_size=4, stride=2, padding=1, output_padding=1),
+                        nn.GELU()
+                    )
+                )
+                in_channels = in_channels // scale_factor
+
+            upsample_layers.append(nn.Sequential(
+                nn.ConvTranspose2d(in_channels=in_channels, out_channels=output_channels, kernel_size=4, stride=2, padding=1, output_padding=1),
+                TrimPixels(img_size=img_size),
+                nn.Sigmoid()
+            ))
         self.decoder = nn.Sequential(*upsample_layers)
 
     def forward(self, z_q):
@@ -125,7 +138,10 @@ class Quantizer(nn.Module):
         quantized = torch.matmul(one_hot_encodings, self.codebook.weight) # [B*H*W, D]
         
         codebook_loss = F.mse_loss(z.detach(), quantized) # move the codebook's latent towards the encoder's output.
-        commitment_loss = self.beta *F.mse_loss(z, quantized.detach()) # commits the encoder to output vectors close to the codebook's
+        commitment_loss = self.beta * F.mse_loss(z, quantized.detach()) # commits the encoder to output vectors close to the codebook's
+        
+        # Make the gradient with respect to latents be equal to the gradient with respect to quantized latents 
+        quantized = z + (quantized - z).detach()
 
         # reshape to prepare dimensions for decoder
         quantized = rearrange(quantized, '(b h w) d -> b d h w', b=b, h=h, w=w)
@@ -163,9 +179,9 @@ class VQVAE(DeepLearning):
 
         # get criterion
         if 'criterion' not in kwargs:
-            criterion = nn.MSELoss(reduction='none')
+            criterion = nn.MSELoss()
         else:
-            criterion = kwargs['criterion'](reduction='none')
+            criterion = kwargs['criterion']()
 
         # get epochs
         assert 'epochs' in kwargs, "Please specify the number of epochs to start training"
@@ -205,12 +221,10 @@ class VQVAE(DeepLearning):
         train_loss = 0.0
         for data in train_dl:
             imgs = data[0].to(device)
-            batch_size=data[0].shape[0]
             
             x_hat, codebook_loss, commitment_loss = self.forward(imgs)
 
-            pixelwise_loss = criterion(x_hat, imgs).view(batch_size, -1).sum(axis=1) # sum pixels loss per batch
-            pixelwise_loss = pixelwise_loss.mean() # average over batch dimension
+            pixelwise_loss = criterion(x_hat, imgs) # average over batch dimension
 
             loss = pixelwise_loss + codebook_loss + commitment_loss
 
@@ -229,43 +243,16 @@ class VQVAE(DeepLearning):
         val_loss = 0.0
         for data in val_dl:
             imgs = data[0].to(device)
-            batch_size = data[0].shape[0]
-
             x_hat, codebook_loss, commitment_loss = self.forward(imgs)
-            pixelwise_loss = criterion(x_hat, imgs).view(batch_size, -1).sum(axis=1) # sum pixels loss per batch
-            pixelwise_loss = pixelwise_loss.mean() # average over batch dimension
+            pixelwise_loss = criterion(x_hat, imgs)
 
             loss = pixelwise_loss + codebook_loss + commitment_loss
 
             val_loss += loss.item()
         
+                # visually checking the images
+        if kwargs['e'] % 5 == 0:
+            cv2.imwrite(f'./sample_{kwargs['e']}.png', torch.permute(x_hat[0]*255, (1, 2, 0)).cpu().detach().numpy())
+
+        
         return val_loss / len(val_dl)
-    
-
-# if __name__ == "__main__":
-
-#     from atlas_ml.datasets.data_pipeline import DataPipeline
-
-#     vq_vae = VQVAE(
-#         input_channels=1, 
-#         output_channels=1, 
-#         hidden_dims=[32, 64, 128], 
-#         codebook_dim=512, 
-#         img_size=28, 
-#         latent_dim=64, 
-#         scale_factor=2, 
-#         expansion_factor=3
-#         )
-#     dataset_config = {'batch_size':128, 'val_split':0.2, 'num_workers':2, 'pin_memory':True}
-#     train_dl, val_dl = DataPipeline(configs=dataset_config).get_dataset() # default is mnist
-
-
-#     vq_vae.train_model(
-#         train_dataloader=train_dl,
-#         val_dataloader=val_dl,
-#         optimizer=torch.optim.Adam,
-#         criterion=nn.MSELoss,
-#         epochs=10,
-#         lr=3e-4,
-#         device='cuda'
-#     )
