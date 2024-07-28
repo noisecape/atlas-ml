@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="./assets/atlas_ml_logo.png" alt="ATLAS ML LOGO">
+</p>
+
+
 # Atlas ML
 
 Welcome to Atlas ML, a comprehensive resource for machine learning algorithms. This repository is designed to serve as a practical toolkit for seasoned data scientists and researchers.
